@@ -16,7 +16,7 @@ It can be untsable, it can crash, it can cause all kind of issues.
 -  Option to change default device (of which to show battery status)
 -  All number status icons were generated using a script so they are not under any license and are completely free to use, change or do anything you please with them
 - Different color of icon **(red 0-10, blue 11-50, green 51-100)**
-- You can replace icons simply by replacing files in the **/ico** folder
+- Icons are bundled in the executable. To use your own, drop an **ico** folder next to the executable: it takes precedence over the bundled ones
 
 
 ## Requirements
@@ -25,7 +25,7 @@ It can be untsable, it can crash, it can cause all kind of issues.
 
 - NPM [Official Website](https://www.npmjs.com/ 'NPM')
 
-- NodeJS [Official Website](https://nodejs.org/en/ 'NodeJS') 
+- NodeJS 20 or later [Official Website](https://nodejs.org/en/ 'NodeJS') 
 
 *Logitech G HUB has to be running all the time for this widget to work*
 
@@ -90,19 +90,19 @@ $ cd LogiBAT
 $ npm install
 ```
 
-Build the project
+Build the project (produces a standalone executable in **bin**, icons included)
 ```
 $ npm run build
 ```
 
-Copy assets (**ico**) to the binary folder (**bin/ico**)
-```
-$ xcopy ico bin/ico
-```
-
 Launch the program
 ```
-$ .\LogiBAT_patched.exe
+$ .\bin\LogiBAT_patched.exe
+```
+
+Alternatively, run it straight from the sources without building
+```
+$ node index.js
 ```
 
 
