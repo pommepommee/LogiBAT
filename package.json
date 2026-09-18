@@ -1,8 +1,12 @@
 {
     "name": "LogiBAT",
     "description": "Logitech Battery Tray Widget",
+    "main": "./index.js",
     "bin": "./index.js",
     "version": "0.0.1",
+    "engines": {
+        "node": ">=20"
+    },
     "prettier": {
         "trailingComma": "all",
         "tabWidth": 3,
@@ -13,27 +17,24 @@
     },
     "dependencies": {
         "not-the-systray": "^0.3.1",
-        "ws": "^8.8.0"
+        "ws": "^8.18.0"
     },
     "devDependencies": {
-        "create-nodew-exe": "^1.0.10",
-        "pkg": "^5.7.0"
+        "@yao-pkg/pkg": "^6.22.0",
+        "create-nodew-exe": "^2.1.1"
     },
     "pkg": {
-        "scripts": [
-            "config/*.js"
-        ],
         "assets": [
             "./ico/*",
             "./node_modules/not-the-systray/notify_icon.node"
         ],
         "targets": [
-            "node14-win"
+            "node22-win-x64"
         ],
         "outputPath": "./bin"
     },
     "scripts": {
         "build": "pkg .",
-        "postbuild": "node postbuild.js"
+        "postbuild": "create-nodew-exe ./bin/LogiBAT.exe ./bin/LogiBAT_patched.exe"
     }
 }
