@@ -11,8 +11,9 @@ const { version: APP_VERSION } = require('./package.json');
 const GHUB_WS_URL = 'ws://localhost:9010';
 
 const ICON_DIR = resolveIconDir();
+const CONFIG_PATH = resolveConfigPath();
 
-//menu ids 1 and 2 are reserved, device entries start above them to avoid collisions with deviceUnitId
+//menu ids 1 and 2 are reserved, device entries start above them
 const MENU_ID_EXIT = 1;
 const MENU_ID_DEVICES = 2;
 const MENU_ID_DEVICE_OFFSET = 100;
@@ -25,103 +26,174 @@ const TOOLTIP_MAX_LENGTH = 127;
 
 class App {
    constructor() {
+      this.config = new ConfigStore(CONFIG_PATH);
       this.deviceManager = new DeviceManager();
-      this.tray = new TrayManager(this.deviceManager);
+      this.tray = new TrayManager(this.deviceManager, this.config);
 
       this.deviceManager.onDevicesChanged = this.tray.update;
       this.deviceManager.start();
+      this.tray.update();
    }
 }
 
-class TrayManager {
-   constructor(deviceManager) {
-      this.deviceManager = deviceManager;
+//remembers which devices the user hid. Hidden ones are stored rather than visible ones, so a device
+//that has never been seen shows up on its own and nothing has to be written until something is unchecked.
+class ConfigStore {
+   constructor(filePath) {
+      this.filePath = filePath;
+      this.hiddenDevices = new Set(readHiddenDevices(filePath));
+   }
 
-      this.handleMenu = this.handleMenu.bind(this);
-      this.onSelect = this.onSelect.bind(this);
+   isHidden(deviceUnitId) {
+      return this.hiddenDevices.has(deviceUnitId);
+   }
+
+   toggle(deviceUnitId) {
+      if (!this.hiddenDevices.delete(deviceUnitId)) {
+         this.hiddenDevices.add(deviceUnitId);
+      }
+
+      this.save();
+   }
+
+   //a config that cannot be written is not worth crashing over, the app just forgets the choice
+   save() {
+      try {
+         fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+         fs.writeFileSync(this.filePath, JSON.stringify({ hiddenDevices: [...this.hiddenDevices] }, null, 2));
+      } catch (err) {
+         console.error('Could not save ' + this.filePath + ': ' + err.message);
+      }
+   }
+}
+
+//creates, updates and removes one tray icon per visible device, plus the permanent control icon
+class TrayManager {
+   constructor(deviceManager, config) {
+      this.deviceManager = deviceManager;
+      this.config = config;
       this.update = this.update.bind(this);
 
       this.icons = loadIcons();
-      this.icon = new NotifyIcon({
-         icon: this.icons.loading,
-         tooltip: 'LOADING STATE',
-         onSelect: this.onSelect,
+      this.deviceIcons = new Map();
+
+      this.control = new ControlIcon(this.icons, {
+         onToggleDevice: (deviceUnitId) => {
+            this.config.toggle(deviceUnitId);
+            this.update();
+         },
+         onExit: () => {
+            this.dispose();
+            process.exit(0);
+         },
       });
-
-      this.trackedDevice = null;
-      //pid of each menu entry, indexed the same way as the menu items
-      this.menuDevices = [];
-
-      this.menu = new Menu([{ id: MENU_ID_DEVICES, text: 'Set Default Device', items: [] }, { separator: true }, { id: MENU_ID_EXIT, text: 'Exit' }]);
    }
 
-   //rebuilds the device submenu and the tray icon/tooltip from the current device list
    update() {
       const devices = this.deviceManager.getDevices();
+      const visible = devices.filter((device) => !this.config.isHidden(device.deviceUnitId));
 
-      //the tracked device may have been unplugged, fall back to the first one available
-      if (this.trackedDevice !== null && !devices.some((device) => device.pid === this.trackedDevice)) {
-         this.trackedDevice = null;
-      }
-      if (this.trackedDevice === null && devices.length > 0) {
-         this.trackedDevice = devices[0].pid;
+      for (const [deviceUnitId, icon] of this.deviceIcons) {
+         if (!visible.some((device) => device.deviceUnitId === deviceUnitId)) {
+            icon.dispose();
+            this.deviceIcons.delete(deviceUnitId);
+         }
       }
 
-      this.menuDevices = devices.map((device) => device.pid);
-      this.menu.update(MENU_ID_DEVICES, {
-         items: devices.map((device, index) => ({
-            id: MENU_ID_DEVICE_OFFSET + index,
-            text: device.displayName + ' (' + device.pid + ')',
-            checked: device.pid === this.trackedDevice,
-         })),
+      visible.forEach((device) => {
+         let icon = this.deviceIcons.get(device.deviceUnitId);
+         if (!icon) {
+            icon = new DeviceIcon(this.icons);
+            this.deviceIcons.set(device.deviceUnitId, icon);
+         }
+
+         icon.update(device);
       });
 
-      this.render(devices);
+      this.control.update(devices, this.config);
    }
 
-   //updates text and icon in systray
-   render(devices) {
-      const known = devices.filter((device) => device.percentage != null);
-      const tracked = known.find((device) => device.pid === this.trackedDevice);
+   dispose() {
+      this.deviceIcons.forEach((icon) => icon.dispose());
+      this.deviceIcons.clear();
+      this.control.dispose();
+   }
+}
 
-      const tooltip = known.length > 0 ? known.map((device) => device.displayName + ' ' + device.percentage + '%').join('\n') : 'No Logitech wireless device found';
+//one tray icon showing a single device battery level. Display only, it carries no menu.
+class DeviceIcon {
+   constructor(icons) {
+      this.icons = icons;
+      this.icon = new NotifyIcon({ icon: icons.questionmark, tooltip: '' });
+   }
 
+   update(device) {
       this.icon.update({
-         tooltip: tooltip.slice(0, TOOLTIP_MAX_LENGTH),
-         icon: tracked ? this.icons[clampPercentage(tracked.percentage)] : this.icons.questionmark,
+         icon: device.percentage == null ? this.icons.questionmark : this.icons[clampPercentage(device.percentage)],
+         tooltip: truncate(device.displayName + ' ' + (device.percentage == null ? '?' : device.percentage + '%')),
       });
    }
 
-   //on menu click
-   onSelect({ rightButton, mouseX, mouseY }) {
-      if (rightButton) {
-         this.handleMenu(mouseX, mouseY);
-      }
+   dispose() {
+      removeIcon(this.icon);
+   }
+}
+
+//always present, so the menu stays reachable even when every device is hidden
+class ControlIcon {
+   constructor(icons, { onToggleDevice, onExit }) {
+      this.onToggleDevice = onToggleDevice;
+      this.onExit = onExit;
+      this.menuDevices = [];
+
+      this.icon = new NotifyIcon({
+         icon: icons.logo,
+         tooltip: 'LogiBAT',
+         onSelect: ({ rightButton, mouseX, mouseY }) => {
+            if (rightButton) this.showMenu(mouseX, mouseY);
+         },
+      });
+
+      this.menu = new Menu([{ id: MENU_ID_DEVICES, text: 'Show icon for', items: [] }, { separator: true }, { id: MENU_ID_EXIT, text: 'Exit' }]);
    }
 
-   //handle menu click
-   handleMenu(x, y) {
+   update(devices, config) {
+      this.menuDevices = devices.map((device) => device.deviceUnitId);
+
+      this.menu.update(MENU_ID_DEVICES, {
+         items:
+            devices.length > 0
+               ? devices.map((device, index) => ({
+                    id: MENU_ID_DEVICE_OFFSET + index,
+                    text: describe(device),
+                    checked: !config.isHidden(device.deviceUnitId),
+                 }))
+               : [{ id: MENU_ID_DEVICE_OFFSET, text: 'No device found', disabled: true }],
+      });
+
+      const known = devices.filter((device) => device.percentage != null);
+      this.icon.update({
+         tooltip: truncate(known.length > 0 ? known.map((device) => device.displayName + ' ' + device.percentage + '%').join('\n') : 'No Logitech wireless device found'),
+      });
+   }
+
+   showMenu(x, y) {
       const id = this.menu.showSync(x, y);
 
       if (id === MENU_ID_EXIT) {
-         this.dispose();
-         process.exit(0);
+         this.onExit();
+         return;
       }
 
-      const pid = this.menuDevices[id - MENU_ID_DEVICE_OFFSET];
-      if (pid !== undefined && pid !== this.trackedDevice) {
-         this.trackedDevice = pid;
-         this.update();
+      //the placeholder entry sits at the offset too, but menuDevices is empty when it is shown
+      const deviceUnitId = this.menuDevices[id - MENU_ID_DEVICE_OFFSET];
+      if (deviceUnitId !== undefined) {
+         this.onToggleDevice(deviceUnitId);
       }
    }
 
-   //removes the tray icon so windows does not leave a ghost entry behind
    dispose() {
-      try {
-         this.icon.remove();
-      } catch (err) {
-         //nothing we can do at this point, we are exiting anyway
-      }
+      removeIcon(this.icon);
    }
 }
 
@@ -212,10 +284,10 @@ class DeviceManager {
             const known = this.devices[device.id];
             this.devices[device.id] = {
                id: device.id,
-               pid: device.pid,
+               //serial number of the unit: stable across restarts and unique per physical device
                deviceUnitId: device.deviceUnitId,
                displayName: device.displayName,
-               extendedDisplayName: device.extendedDisplayName,
+               deviceType: device.deviceType,
                percentage: known ? known.percentage : null,
             };
 
@@ -239,9 +311,25 @@ class DeviceManager {
    }
 }
 
+function describe(device) {
+   return device.deviceType ? device.displayName + ' (' + device.deviceType.toLowerCase() + ')' : device.displayName;
+}
+
+function truncate(text) {
+   return text.slice(0, TOOLTIP_MAX_LENGTH);
+}
+
 //icons only exist from 1 to 100, a device reporting 0% would otherwise resolve to undefined
 function clampPercentage(percentage) {
    return Math.min(100, Math.max(1, Math.round(percentage)));
+}
+
+function removeIcon(icon) {
+   try {
+      icon.remove();
+   } catch (err) {
+      //nothing useful to do, the icon is going away either way
+   }
 }
 
 function resolveIconDir() {
@@ -284,6 +372,22 @@ function readTextOrNull(filePath) {
       return fs.readFileSync(filePath, 'utf8');
    } catch (err) {
       return null;
+   }
+}
+
+function resolveConfigPath() {
+   return path.join(process.env.APPDATA || os.homedir(), 'LogiBAT', 'config.json');
+}
+
+//a missing or unreadable config simply means nothing is hidden
+function readHiddenDevices(filePath) {
+   try {
+      const config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (!Array.isArray(config.hiddenDevices)) return [];
+
+      return config.hiddenDevices.filter((deviceUnitId) => typeof deviceUnitId === 'string');
+   } catch (err) {
+      return [];
    }
 }
 
