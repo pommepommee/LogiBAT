@@ -1,227 +1,276 @@
-var WebSocket = require('ws');
-var { NotifyIcon, Icon, Menu } = require('not-the-systray');
-var path = require('path');
+'use strict';
+
+const WebSocket = require('ws');
+const { NotifyIcon, Icon, Menu } = require('not-the-systray');
+const fs = require('fs');
+const path = require('path');
+
+const GHUB_WS_URL = 'ws://localhost:9010';
+
+//icons are bundled in the executable, but an ico folder placed next to it wins so they stay replaceable
+const ICON_DIR = resolveIconDir();
+
+//menu ids 1 and 2 are reserved, device entries start above them to avoid collisions with deviceUnitId
+const MENU_ID_EXIT = 1;
+const MENU_ID_DEVICES = 2;
+const MENU_ID_DEVICE_OFFSET = 100;
+
+const DEVICE_LIST_INTERVAL = 10000;
+const RECONNECT_INTERVAL = 5000;
+
+//Shell_NotifyIcon truncates tooltips longer than 127 characters
+const TOOLTIP_MAX_LENGTH = 127;
 
 class App {
    constructor() {
-      this.tray = new TrayManager();
       this.deviceManager = new DeviceManager();
+      this.tray = new TrayManager(this.deviceManager);
+
+      this.deviceManager.onDevicesChanged = this.tray.update;
+      this.deviceManager.start();
    }
 }
 
 class TrayManager {
-   constructor() {
-      this.icons = {};
-      this.handleMenu = this.handleMenu.bind(this);
-      this.loadIcons = this.loadIcons.bind(this);
-      this.onSelect = this.onSelect.bind(this);
-      this.updateTray = this.updateTray.bind(this);
-      this.setTrackedDevice = this.setTrackedDevice.bind(this);
-      this.updateStateCycle = this.updateStateCycle.bind(this);
+   constructor(deviceManager) {
+      this.deviceManager = deviceManager;
 
-      this.loadIcons();
+      this.handleMenu = this.handleMenu.bind(this);
+      this.onSelect = this.onSelect.bind(this);
+      this.update = this.update.bind(this);
+
+      this.icons = loadIcons();
       this.icon = new NotifyIcon({
-         icon: this.icons['loading'],
+         icon: this.icons.loading,
          tooltip: 'LOADING STATE',
          onSelect: this.onSelect,
       });
 
       this.trackedDevice = null;
+      //pid of each menu entry, indexed the same way as the menu items
+      this.menuDevices = [];
 
-      this.menu = new Menu([{ id: 2, text: 'Set Default Device', items: [] }, { separator: true }, { id: 1, text: 'Exit' }]);
-
-      setInterval(this.updateStateCycle, 60000);
+      this.menu = new Menu([{ id: MENU_ID_DEVICES, text: 'Set Default Device', items: [] }, { separator: true }, { id: MENU_ID_EXIT, text: 'Exit' }]);
    }
 
-   //updates submenu with devices list
-   updateTray(devicesObject) {
-      var devices = Object.values(devicesObject);
-      if (!devices) return false;
+   //rebuilds the device submenu and the tray icon/tooltip from the current device list
+   update() {
+      const devices = this.deviceManager.getDevices();
 
-      if(this.trackedDevice){
-         var device = devices.filter((device) => device.pid == this.trackedDevice);
-         if(device.length == 0){
-            this.trackedDevice = null;
-         }
+      //the tracked device may have been unplugged, fall back to the first one available
+      if (this.trackedDevice !== null && !devices.some((device) => device.pid === this.trackedDevice)) {
+         this.trackedDevice = null;
+      }
+      if (this.trackedDevice === null && devices.length > 0) {
+         this.trackedDevice = devices[0].pid;
       }
 
-      this.menu.update(2, {
-         items: Object.values(devices).map((device) => {
-            if (this.trackedDevice == null) {
-               this.setTrackedDevice(device.pid);
-            }
+      this.menuDevices = devices.map((device) => device.pid);
+      this.menu.update(MENU_ID_DEVICES, {
+         items: devices.map((device, index) => ({
+            id: MENU_ID_DEVICE_OFFSET + index,
+            text: device.displayName + ' (' + device.pid + ')',
+            checked: device.pid === this.trackedDevice,
+         })),
+      });
 
-            return {
-               id: Number(device.deviceUnitId),
-               text: device.displayName + '(' + device.pid + ')',
-               checked: device.pid == this.trackedDevice,
-            };
-         }),
+      this.render(devices);
+   }
+
+   //updates text and icon in systray
+   render(devices) {
+      const known = devices.filter((device) => device.percentage != null);
+      const tracked = known.find((device) => device.pid === this.trackedDevice);
+
+      const tooltip = known.length > 0 ? known.map((device) => device.displayName + ' ' + device.percentage + '%').join('\n') : 'No Logitech wireless device found';
+
+      this.icon.update({
+         tooltip: tooltip.slice(0, TOOLTIP_MAX_LENGTH),
+         icon: tracked ? this.icons[clampPercentage(tracked.percentage)] : this.icons.questionmark,
       });
    }
 
    //on menu click
-   onSelect({ target, rightButton, mouseX, mouseY }) {
+   onSelect({ rightButton, mouseX, mouseY }) {
       if (rightButton) {
          this.handleMenu(mouseX, mouseY);
       }
    }
 
-   //changes tracked device and triggers updateStateCycle
-   setTrackedDevice(deviceId) {
-      if (this.trackedDevice == deviceId) return false;
-
-      this.trackedDevice = deviceId;
-      this.updateStateCycle();
-   }
-
-   //updates text, icon in systray
-   updateStateCycle() {
-      var devices = Object.values(app.deviceManager.devices).filter((device) => device.percentage != null);
-      var mainDevice = devices.filter((device) => device.pid == this.trackedDevice);
-      var finalIcon = this.icons['questionmark'];
-
-      if (mainDevice.length == 1) {
-         finalIcon = this.icons[Math.round(mainDevice[0].percentage)];
-      }
-
-      this.icon.update({
-         tooltip: devices
-            .map((device) => {
-               return device.displayName + ' ' + device.percentage + '%';
-            })
-            .join('\n'),
-         icon: finalIcon,
-      });
-   }
-
    //handle menu click
    handleMenu(x, y) {
       const id = this.menu.showSync(x, y);
-      if (id == 1) {
-         process.exit();
+
+      if (id === MENU_ID_EXIT) {
+         this.dispose();
+         process.exit(0);
       }
 
-      var devices = Object.values(app.deviceManager.devices).filter((device) => device.deviceUnitId == id);
-
-      if (devices.length == 1) {
-         var selectedDevice = devices[0];
-         this.setTrackedDevice(selectedDevice.pid);
+      const pid = this.menuDevices[id - MENU_ID_DEVICE_OFFSET];
+      if (pid !== undefined && pid !== this.trackedDevice) {
+         this.trackedDevice = pid;
+         this.update();
       }
    }
 
-   //load icon assets
-   loadIcons() {
-      for (var i = 1; i <= 100; i++) {
-         this.icons[i] = Icon.load(path.join('./ico', [i, '.ico'].join('')), Icon.small);
+   //removes the tray icon so windows does not leave a ghost entry behind
+   dispose() {
+      try {
+         this.icon.remove();
+      } catch (err) {
+         //nothing we can do at this point, we are exiting anyway
       }
-      this.icons['questionmark'] = Icon.load(path.join('./ico', 'questionmark.ico'), Icon.small);
-      this.icons['loading'] = Icon.load(path.join('./ico', 'loading.ico'), Icon.small);
    }
 }
 
 class DeviceManager {
    constructor() {
-      this.listen = this.listen.bind(this);
-      this.getDeviceList = this.getDeviceList.bind(this);
-      this.requestBatteryState = this.requestBatteryState.bind(this);
-      this.registerDevice = this.registerDevice.bind(this);
-      this.updateDeviceBattery = this.updateDeviceBattery.bind(this);
-
       this.connect = this.connect.bind(this);
-      this.connect();
+      this.getDeviceList = this.getDeviceList.bind(this);
 
+      this.ws = null;
       this.devices = {};
-
-      setInterval(this.getDeviceList, 10000);
-      setInterval(this.connect, 5000);
+      this.onDevicesChanged = () => {};
    }
 
-   //connect to websocket, this function is on interval to automatically reconnect if hub wasnt started before or crashed
+   start() {
+      this.connect();
+      setInterval(this.getDeviceList, DEVICE_LIST_INTERVAL);
+      //automatically reconnects if the hub was not started yet or crashed
+      setInterval(this.connect, RECONNECT_INTERVAL);
+   }
+
+   getDevices() {
+      return Object.values(this.devices);
+   }
+
    connect() {
-      if (this.ws === undefined || (this.ws && (this.ws.readyState === 3 || this.ws.readyState == 0))) {
-         this.ws = new WebSocket('ws://localhost:9010', 'json');
-         this.ws.on('error', () => {});
-         this.listen();
-      }
+      if (this.ws && this.ws.readyState !== WebSocket.CLOSED) return;
+
+      this.ws = new WebSocket(GHUB_WS_URL, 'json');
+      //without a handler, a failed connection would crash the process
+      this.ws.on('error', () => {});
+      this.ws.on('open', this.getDeviceList);
+      this.ws.on('message', (data) => this.handleMessage(data));
+      this.ws.on('close', () => {
+         this.devices = {};
+         this.onDevicesChanged();
+      });
    }
 
-   //request device list from websocket
-   getDeviceList() {
-      this.ws.send(JSON.stringify({ path: '/devices/list', verb: 'GET' }));
-   }
+   //ws throws synchronously when the socket is not open yet, so every send goes through here
+   send(payload) {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-   //request battery state from websocket based on getDeviceList() device list
-   requestBatteryState(deviceId) {
       try {
-         this.ws.send(
-            JSON.stringify({
-               path: '/battery/' + deviceId + '/state',
-               verb: 'GET',
-            }),
-         );
+         this.ws.send(JSON.stringify(payload));
       } catch (err) {
          console.error(err);
       }
    }
 
-   //device received from websocket message gets inserted into a object/map
-   registerDevice(device) {
-      if (device.id in this.devices) return false;
-      if (device.connectionType != 'WIRELESS') return false;
-
-      this.devices[device.id] = {
-         id: device.id,
-         pid: device.pid,
-         deviceUnitId: device.deviceUnitId,
-         displayName: device.displayName,
-         extendedDisplayName: device.extendedDisplayName,
-         percentage: null,
-      };
+   getDeviceList() {
+      this.send({ path: '/devices/list', verb: 'GET' });
    }
 
-   //if device is already registered then we can update battery from another websocket message
+   requestBatteryState(deviceId) {
+      this.send({ path: '/battery/' + deviceId + '/state', verb: 'GET' });
+   }
+
+   handleMessage(data) {
+      let json;
+      try {
+         json = JSON.parse(data);
+      } catch (err) {
+         return;
+      }
+
+      if (typeof json.path !== 'string' || !json.result || json.result.code !== 'SUCCESS' || !json.payload) return;
+
+      if (json.path === '/devices/list') {
+         this.syncDeviceList(json.payload.deviceInfos || []);
+         return;
+      }
+
+      if (json.path.startsWith('/battery/') && json.path.endsWith('/state')) {
+         const deviceId = json.path.slice('/battery/'.length, -'/state'.length);
+         this.updateDeviceBattery(deviceId, json.payload.percentage);
+      }
+   }
+
+   //merges the incoming list into the known devices, keeping already known battery levels
+   syncDeviceList(deviceInfos) {
+      const seen = new Set();
+
+      deviceInfos
+         .filter((device) => device.connectionType === 'WIRELESS')
+         .forEach((device) => {
+            seen.add(device.id);
+
+            const known = this.devices[device.id];
+            this.devices[device.id] = {
+               id: device.id,
+               pid: device.pid,
+               deviceUnitId: device.deviceUnitId,
+               displayName: device.displayName,
+               extendedDisplayName: device.extendedDisplayName,
+               percentage: known ? known.percentage : null,
+            };
+
+            this.requestBatteryState(device.id);
+         });
+
+      Object.keys(this.devices).forEach((id) => {
+         if (!seen.has(id)) delete this.devices[id];
+      });
+
+      this.onDevicesChanged();
+   }
+
    updateDeviceBattery(deviceId, percentage) {
-      if (!deviceId in this.devices) return false;
-      this.devices[deviceId].percentage = percentage;
+      const device = this.devices[deviceId];
+      //battery states of wired devices are ignored, they are not tracked
+      if (!device || typeof percentage !== 'number') return;
 
-      app.tray.updateTray(this.devices);
-   }
-
-   //start listening to websocket
-   listen() {
-      this.ws.on('open', () => {
-         this.getDeviceList();
-      });
-
-      this.ws.on('message', (data) => {
-         try {
-            var json = JSON.parse(data);
-
-            //on receiving device list from getDeviceList();
-            if (json.path == '/devices/list' && json.result.code == 'SUCCESS') {
-               this.devices = {};
-               json.payload.deviceInfos.forEach((device) => {
-                  this.registerDevice(device);
-                  this.requestBatteryState(device.id);
-               });
-            }
-
-            //on receiving battery state of %deviceId% from requestBatteryState(%deviceId%)
-            if (json.path.includes('/battery/') && json.path.includes('/state') && json.result.code == 'SUCCESS') {
-               var deviceId = json.path.replace('/battery/', '').replace('/state', '');
-               var percentage = json.payload.percentage;
-               this.updateDeviceBattery(deviceId, percentage);
-            }
-         } catch (err) {
-            console.error(err);
-         }
-      });
+      device.percentage = percentage;
+      this.onDevicesChanged();
    }
 }
 
-var app = new App();
+//icons only exist from 1 to 100, a device reporting 0% would otherwise resolve to undefined
+function clampPercentage(percentage) {
+   return Math.min(100, Math.max(1, Math.round(percentage)));
+}
+
+function resolveIconDir() {
+   if (process.pkg) {
+      const externalDir = path.join(path.dirname(process.execPath), 'ico');
+      if (fs.existsSync(externalDir)) return externalDir;
+   }
+
+   return path.join(__dirname, 'ico');
+}
+
+function loadIcons() {
+   const icons = {};
+
+   try {
+      for (let i = 1; i <= 100; i++) {
+         icons[i] = Icon.load(path.join(ICON_DIR, i + '.ico'), Icon.small);
+      }
+      icons.questionmark = Icon.load(path.join(ICON_DIR, 'questionmark.ico'), Icon.small);
+      icons.loading = Icon.load(path.join(ICON_DIR, 'loading.ico'), Icon.small);
+   } catch (err) {
+      console.error('Could not load icons from ' + ICON_DIR);
+      throw err;
+   }
+
+   return icons;
+}
+
+const app = new App();
 
 process.on('SIGINT', () => {
-   process.exit();
+   app.tray.dispose();
+   process.exit(0);
 });
