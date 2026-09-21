@@ -76,8 +76,9 @@ class TrayManager {
 
       this.icons = loadIcons();
       this.deviceIcons = new Map();
+      this.fallbackIcon = null;
 
-      this.control = new ControlIcon(this.icons, {
+      this.menu = new TrayMenu({
          onToggleDevice: (deviceUnitId) => {
             this.config.toggle(deviceUnitId);
             this.update();
@@ -93,6 +94,8 @@ class TrayManager {
       const devices = this.deviceManager.getDevices();
       const visible = devices.filter((device) => !this.config.isHidden(device.deviceUnitId));
 
+      this.menu.update(devices, this.config);
+
       for (const [deviceUnitId, icon] of this.deviceIcons) {
          if (!visible.some((device) => device.deviceUnitId === deviceUnitId)) {
             icon.dispose();
@@ -103,56 +106,52 @@ class TrayManager {
       visible.forEach((device) => {
          let icon = this.deviceIcons.get(device.deviceUnitId);
          if (!icon) {
-            icon = new DeviceIcon(this.icons);
+            icon = new DeviceIcon(this.icons, this.menu);
             this.deviceIcons.set(device.deviceUnitId, icon);
          }
 
          icon.update(device);
       });
 
-      this.control.update(devices, this.config);
+      this.updateFallback(devices, visible);
+   }
+
+   //the tray must always keep one icon able to open the menu, otherwise hiding everything
+   //would leave no way to bring the devices back or to quit
+   updateFallback(devices, visible) {
+      if (visible.length > 0) {
+         if (this.fallbackIcon) {
+            this.fallbackIcon.dispose();
+            this.fallbackIcon = null;
+         }
+
+         return;
+      }
+
+      if (!this.fallbackIcon) {
+         this.fallbackIcon = new FallbackIcon(this.icons, this.menu);
+      }
+
+      this.fallbackIcon.update(devices);
    }
 
    dispose() {
       this.deviceIcons.forEach((icon) => icon.dispose());
       this.deviceIcons.clear();
-      this.control.dispose();
+
+      if (this.fallbackIcon) {
+         this.fallbackIcon.dispose();
+         this.fallbackIcon = null;
+      }
    }
 }
 
-//one tray icon showing a single device battery level. Display only, it carries no menu.
-class DeviceIcon {
-   constructor(icons) {
-      this.icons = icons;
-      this.icon = new NotifyIcon({ icon: icons.questionmark, tooltip: '' });
-   }
-
-   update(device) {
-      this.icon.update({
-         icon: device.percentage == null ? this.icons.questionmark : this.icons[clampPercentage(device.percentage)],
-         tooltip: truncate(device.displayName + ' ' + (device.percentage == null ? '?' : device.percentage + '%')),
-      });
-   }
-
-   dispose() {
-      removeIcon(this.icon);
-   }
-}
-
-//always present, so the menu stays reachable even when every device is hidden
-class ControlIcon {
-   constructor(icons, { onToggleDevice, onExit }) {
+//the context menu, shared by every icon in the tray
+class TrayMenu {
+   constructor({ onToggleDevice, onExit }) {
       this.onToggleDevice = onToggleDevice;
       this.onExit = onExit;
       this.menuDevices = [];
-
-      this.icon = new NotifyIcon({
-         icon: icons.logo,
-         tooltip: 'LogiBAT',
-         onSelect: ({ rightButton, mouseX, mouseY }) => {
-            if (rightButton) this.showMenu(mouseX, mouseY);
-         },
-      });
 
       this.menu = new Menu([{ id: MENU_ID_DEVICES, text: 'Show icon for', items: [] }, { separator: true }, { id: MENU_ID_EXIT, text: 'Exit' }]);
    }
@@ -170,14 +169,9 @@ class ControlIcon {
                  }))
                : [{ id: MENU_ID_DEVICE_OFFSET, text: 'No device found', disabled: true }],
       });
-
-      const known = devices.filter((device) => device.percentage != null);
-      this.icon.update({
-         tooltip: truncate(known.length > 0 ? known.map((device) => device.displayName + ' ' + device.percentage + '%').join('\n') : 'No Logitech wireless device found'),
-      });
    }
 
-   showMenu(x, y) {
+   showAt(x, y) {
       const id = this.menu.showSync(x, y);
 
       if (id === MENU_ID_EXIT) {
@@ -190,6 +184,40 @@ class ControlIcon {
       if (deviceUnitId !== undefined) {
          this.onToggleDevice(deviceUnitId);
       }
+   }
+}
+
+//one tray icon showing a single device battery level
+class DeviceIcon {
+   constructor(icons, menu) {
+      this.icons = icons;
+      this.icon = new NotifyIcon({ icon: icons.questionmark, tooltip: '', onSelect: rightClickHandler(menu) });
+   }
+
+   update(device) {
+      this.icon.update({
+         icon: device.percentage == null ? this.icons.questionmark : this.icons[clampPercentage(device.percentage)],
+         tooltip: truncate(device.displayName + ' ' + (device.percentage == null ? '?' : device.percentage + '%')),
+      });
+   }
+
+   dispose() {
+      removeIcon(this.icon);
+   }
+}
+
+//shown only while no device icon is, so the menu never becomes unreachable
+class FallbackIcon {
+   constructor(icons, menu) {
+      this.icon = new NotifyIcon({ icon: icons.logo, tooltip: 'LogiBAT', onSelect: rightClickHandler(menu) });
+   }
+
+   update(devices) {
+      const known = devices.filter((device) => device.percentage != null);
+
+      this.icon.update({
+         tooltip: truncate(known.length > 0 ? known.map((device) => device.displayName + ' ' + device.percentage + '%').join('\n') : 'No Logitech wireless device found'),
+      });
    }
 
    dispose() {
@@ -309,6 +337,12 @@ class DeviceManager {
       device.percentage = percentage;
       this.onDevicesChanged();
    }
+}
+
+function rightClickHandler(menu) {
+   return ({ rightButton, mouseX, mouseY }) => {
+      if (rightButton) menu.showAt(mouseX, mouseY);
+   };
 }
 
 function describe(device) {

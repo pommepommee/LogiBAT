@@ -12,8 +12,9 @@ It can be untsable, it can crash, it can cause all kind of issues.
 ### Features
 
 -  Displays one icon in your notification area (system tray) per Logitech wireless device, showing its battery level
--  A permanent control icon lets you pick which devices get an icon, and the choice is remembered across restarts in **%APPDATA%\\LogiBAT\\config.json**
--  Hovering the control icon displays the battery status of every Logitech device currently connected
+-  Hovering an icon displays the name and battery level of its device
+-  Right-click any icon to choose which devices get one. The choice is remembered across restarts in **%APPDATA%\\LogiBAT\\config.json**
+-  Hide them all and a single LogiBAT icon takes over, so the menu always stays reachable
 -  All number status icons were generated using a script so they are not under any license and are completely free to use, change or do anything you please with them
 - Different color of icon **(red 0-10, blue 11-50, green 51-100)**
 - Icons are bundled in the executable. To use your own, drop an **ico** folder next to the executable: it takes precedence over the bundled ones
