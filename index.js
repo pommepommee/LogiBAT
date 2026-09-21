@@ -24,6 +24,12 @@ const RECONNECT_INTERVAL = 5000;
 //Shell_NotifyIcon truncates tooltips longer than 127 characters
 const TOOLTIP_MAX_LENGTH = 127;
 
+//Windows ties "pinned or hidden" to an icon identity. The fallback icon is created and destroyed
+//as devices come and go, so without a fixed identity it looks like a brand new icon every time and
+//lands back in the overflow area. Generated once and kept constant on purpose: generating one at
+//runtime would defeat the point. Note that Windows reserves it per executable path.
+const FALLBACK_ICON_GUID = '22e70060-7b43-4ef4-8e1a-902dd6f62b44';
+
 class App {
    constructor() {
       this.config = new ConfigStore(CONFIG_PATH);
@@ -209,7 +215,7 @@ class DeviceIcon {
 //shown only while no device icon is, so the menu never becomes unreachable
 class FallbackIcon {
    constructor(icons, menu) {
-      this.icon = new NotifyIcon({ icon: icons.logo, tooltip: 'LogiBAT', onSelect: rightClickHandler(menu) });
+      this.icon = new NotifyIcon({ guid: FALLBACK_ICON_GUID, icon: icons.logo, tooltip: 'LogiBAT', onSelect: rightClickHandler(menu) });
    }
 
    update(devices) {
