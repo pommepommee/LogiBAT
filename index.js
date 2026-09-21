@@ -285,7 +285,9 @@ class Autostart {
 
    read() {
       try {
-         const output = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { windowsHide: true, encoding: 'utf8' });
+         //reg writes to stderr when the value is missing, which execFileSync would pass straight
+         //to our own console, so stderr is dropped here: a missing value is an expected answer
+         const output = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
          const match = output.match(/REG_SZ\s+(.+)/);
 
          return match ? match[1].trim() : null;
@@ -309,10 +311,11 @@ class Autostart {
 
    run(args) {
       try {
-         execFileSync('reg', args, { windowsHide: true, stdio: 'ignore' });
+         execFileSync('reg', args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
          return true;
       } catch (err) {
-         console.error('Could not update the autostart entry: ' + err.message);
+         //here reg's own message is worth showing, it says why the write was refused
+         console.error('Could not update the autostart entry: ' + String(err.stderr || err.message).trim());
          return false;
       }
    }
