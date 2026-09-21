@@ -97,7 +97,7 @@ $ npm run build
 
 Launch the program
 ```
-$ .\bin\LogiBAT_patched.exe
+$ .\bin\LogiBAT.exe
 ```
 
 Alternatively, run it straight from the sources without building

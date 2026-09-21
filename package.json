@@ -35,6 +35,6 @@
     },
     "scripts": {
         "build": "pkg .",
-        "postbuild": "create-nodew-exe ./bin/LogiBAT.exe ./bin/LogiBAT_patched.exe"
+        "postbuild": "create-nodew-exe ./bin/LogiBAT.exe ./bin/LogiBAT.exe"
     }
 }
