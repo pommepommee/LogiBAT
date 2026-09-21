@@ -2,6 +2,7 @@
 
 const WebSocket = require('ws');
 const { NotifyIcon, Icon, Menu } = require('not-the-systray');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -13,10 +14,15 @@ const GHUB_WS_URL = 'ws://localhost:9010';
 const ICON_DIR = resolveIconDir();
 const CONFIG_PATH = resolveConfigPath();
 
-//menu ids 1 and 2 are reserved, device entries start above them
+//menu ids 1 to 3 are reserved, device entries start above them
 const MENU_ID_EXIT = 1;
 const MENU_ID_DEVICES = 2;
+const MENU_ID_AUTOSTART = 3;
 const MENU_ID_DEVICE_OFFSET = 100;
+
+//per-user, no elevation needed, and removing the value is enough to undo it
+const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const RUN_VALUE = 'LogiBAT';
 
 const DEVICE_LIST_INTERVAL = 10000;
 const RECONNECT_INTERVAL = 5000;
@@ -33,8 +39,9 @@ const FALLBACK_ICON_GUID = '22e70060-7b43-4ef4-8e1a-902dd6f62b44';
 class App {
    constructor() {
       this.config = new ConfigStore(CONFIG_PATH);
+      this.autostart = new Autostart();
       this.deviceManager = new DeviceManager();
-      this.tray = new TrayManager(this.deviceManager, this.config);
+      this.tray = new TrayManager(this.deviceManager, this.config, this.autostart);
 
       this.deviceManager.onDevicesChanged = this.tray.update;
       this.deviceManager.start();
@@ -75,7 +82,7 @@ class ConfigStore {
 
 //creates, updates and removes one tray icon per visible device, plus the permanent control icon
 class TrayManager {
-   constructor(deviceManager, config) {
+   constructor(deviceManager, config, autostart) {
       this.deviceManager = deviceManager;
       this.config = config;
       this.update = this.update.bind(this);
@@ -85,6 +92,7 @@ class TrayManager {
       this.fallbackIcon = null;
 
       this.menu = new TrayMenu({
+         autostart,
          onToggleDevice: (deviceUnitId) => {
             this.config.toggle(deviceUnitId);
             this.update();
@@ -154,12 +162,19 @@ class TrayManager {
 
 //the context menu, shared by every icon in the tray
 class TrayMenu {
-   constructor({ onToggleDevice, onExit }) {
+   constructor({ onToggleDevice, onExit, autostart }) {
       this.onToggleDevice = onToggleDevice;
       this.onExit = onExit;
+      this.autostart = autostart;
       this.menuDevices = [];
 
-      this.menu = new Menu([{ id: MENU_ID_DEVICES, text: 'Show icon for', items: [] }, { separator: true }, { id: MENU_ID_EXIT, text: 'Exit' }]);
+      this.menu = new Menu([
+         { id: MENU_ID_DEVICES, text: 'Show icon for', items: [] },
+         { separator: true },
+         //the entry is left out entirely where there is no registry to write to
+         ...(autostart.isSupported() ? [{ id: MENU_ID_AUTOSTART, text: 'Start with Windows', checked: autostart.enabled }, { separator: true }] : []),
+         { id: MENU_ID_EXIT, text: 'Exit' },
+      ]);
    }
 
    update(devices, config) {
@@ -182,6 +197,12 @@ class TrayMenu {
 
       if (id === MENU_ID_EXIT) {
          this.onExit();
+         return;
+      }
+
+      if (id === MENU_ID_AUTOSTART) {
+         this.autostart.toggle();
+         this.menu.update(MENU_ID_AUTOSTART, { checked: this.autostart.enabled });
          return;
       }
 
@@ -228,6 +249,72 @@ class FallbackIcon {
 
    dispose() {
       removeIcon(this.icon);
+   }
+}
+
+//registers the app in the per-user Run key so Windows starts it at logon
+class Autostart {
+   constructor() {
+      this.supported = process.platform === 'win32';
+      this.command = startCommand();
+      this.enabled = false;
+
+      if (!this.supported) return;
+
+      const registered = this.read();
+      this.enabled = registered !== null;
+
+      //the executable may have been moved since it was registered, which would silently
+      //leave a Run entry pointing at nothing
+      if (this.enabled && registered !== this.command) this.write();
+   }
+
+   isSupported() {
+      return this.supported;
+   }
+
+   toggle() {
+      if (!this.supported) return;
+
+      if (this.enabled) {
+         this.remove();
+      } else {
+         this.write();
+      }
+   }
+
+   read() {
+      try {
+         const output = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { windowsHide: true, encoding: 'utf8' });
+         const match = output.match(/REG_SZ\s+(.+)/);
+
+         return match ? match[1].trim() : null;
+      } catch (err) {
+         //reg exits non-zero when the value does not exist
+         return null;
+      }
+   }
+
+   write() {
+      if (this.run(['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', this.command, '/f'])) {
+         this.enabled = true;
+      }
+   }
+
+   remove() {
+      if (this.run(['delete', RUN_KEY, '/v', RUN_VALUE, '/f'])) {
+         this.enabled = false;
+      }
+   }
+
+   run(args) {
+      try {
+         execFileSync('reg', args, { windowsHide: true, stdio: 'ignore' });
+         return true;
+      } catch (err) {
+         console.error('Could not update the autostart entry: ' + err.message);
+         return false;
+      }
    }
 }
 
@@ -343,6 +430,13 @@ class DeviceManager {
       device.percentage = percentage;
       this.onDevicesChanged();
    }
+}
+
+//packaged, the executable starts itself; from the sources it takes node plus the script
+function startCommand() {
+   const quote = (value) => '"' + value + '"';
+
+   return process.pkg ? quote(process.execPath) : quote(process.execPath) + ' ' + quote(path.join(__dirname, 'index.js'));
 }
 
 function rightClickHandler(menu) {
