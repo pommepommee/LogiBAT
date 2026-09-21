@@ -3,11 +3,13 @@
 const WebSocket = require('ws');
 const { NotifyIcon, Icon, Menu } = require('not-the-systray');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { ICON_FILES } = require('./icons');
+const { version: APP_VERSION } = require('./package.json');
 
 const GHUB_WS_URL = 'ws://localhost:9010';
 
-//icons are bundled in the executable, but an ico folder placed next to it wins so they stay replaceable
 const ICON_DIR = resolveIconDir();
 
 //menu ids 1 and 2 are reserved, device entries start above them to avoid collisions with deviceUnitId
@@ -243,25 +245,57 @@ function clampPercentage(percentage) {
 }
 
 function resolveIconDir() {
-   if (process.pkg) {
-      const externalDir = path.join(path.dirname(process.execPath), 'ico');
-      if (fs.existsSync(externalDir)) return externalDir;
-   }
+   if (!process.pkg) return path.join(__dirname, 'ico');
 
-   return path.join(__dirname, 'ico');
+   //an ico folder next to the executable wins, so the icons stay replaceable without a rebuild
+   const externalDir = path.join(path.dirname(process.execPath), 'ico');
+
+   return fs.existsSync(externalDir) ? externalDir : unpackIcons();
+}
+
+//Icon loading ends up in LoadImageW, a native call that cannot see the virtual filesystem pkg
+//keeps its assets in, so the icons have to exist as real files. They are unpacked once next to
+//the other per-user data, and reused as is afterwards. pkg does the same with native addons.
+function unpackIcons() {
+   const bundledDir = path.join(__dirname, 'ico');
+   const targetDir = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'LogiBAT', 'ico');
+   const stampPath = path.join(targetDir, '.unpacked');
+   const stamp = APP_VERSION + ' ' + ICON_FILES.length;
+
+   try {
+      if (readTextOrNull(stampPath) !== stamp) {
+         fs.mkdirSync(targetDir, { recursive: true });
+         ICON_FILES.forEach(({ file }) => fs.writeFileSync(path.join(targetDir, file), fs.readFileSync(path.join(bundledDir, file))));
+         //written last, so an interrupted unpack is redone rather than trusted
+         fs.writeFileSync(stampPath, stamp);
+      }
+
+      return targetDir;
+   } catch (err) {
+      console.error('Could not unpack the icons to ' + targetDir + ': ' + err.message);
+
+      //loading will fail right after and say so, rather than pretending the icons are elsewhere
+      return bundledDir;
+   }
+}
+
+function readTextOrNull(filePath) {
+   try {
+      return fs.readFileSync(filePath, 'utf8');
+   } catch (err) {
+      return null;
+   }
 }
 
 function loadIcons() {
    const icons = {};
 
    try {
-      for (let i = 1; i <= 100; i++) {
-         icons[i] = Icon.load(path.join(ICON_DIR, i + '.ico'), Icon.small);
-      }
-      icons.questionmark = Icon.load(path.join(ICON_DIR, 'questionmark.ico'), Icon.small);
-      icons.loading = Icon.load(path.join(ICON_DIR, 'loading.ico'), Icon.small);
+      ICON_FILES.forEach(({ key, file }) => {
+         icons[key] = Icon.loadFile(path.join(ICON_DIR, file), Icon.small);
+      });
    } catch (err) {
-      console.error('Could not load icons from ' + ICON_DIR);
+      console.error('Could not load the icons from ' + ICON_DIR);
       throw err;
    }
 
